@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "qemu_mcp_server"
+version = "2025.8.18"
+dependencies = ["qemu", "mcp"]
+requires-python = ">=3.13"
+authors = [{ name = "Daniel Nagy", email = "danielnagy@posteo.de" }]
+maintainers = [{ name = "Daniel Nagy", email = "danielnagy@posteo.de" }]
+description = "Model Context Protocol (MCP) server to interact with QEMU instances"
+# license = "AGPL3+"
+license-files = ["LICENSE"]
+keywords = ["qemu", "mcp"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Programming Language :: Python",
+]
+
+[project.urls]
+Homepage = "https://github.com/nagy/qemu-mcp-server"
+Documentation = "https://readthedocs.org"
+Repository = "https://github.com/nagy/qemu-mcp-server"
+"Bug Tracker" = "https://github.com/nagy/qemu-mcp-server/issues"
+
+# [project.scripts]
+# qemu_mcp_server = "qemu_mcp_server:main"

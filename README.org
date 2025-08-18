@@ -1,0 +1,22 @@
+#+TITLE: qemu-mcp-server
+#+author: Daniel Nagy
+#+language: en
+
+=qemu-mcp-server= is a Model Context Protocol (MCP) server to interact with QEMU instances.
+
+* Building
+
+Quick building via Nix:
+
+#+begin_example
+$ nix-build https://github.com/nagy/qemu-mcp-server/archive/master.tar.gz
+#+end_example
+
+* More Information
+
+- https://qemu.org/
+- https://modelcontextprotocol.io/
+
+* License
+
+[[./LICENSE][AGPL3+]]
