@@ -9,7 +9,7 @@
 Quick building via Nix:
 
 #+begin_example
-$ nix-build https://github.com/nagy/qemu-mcp-server/archive/master.tar.gz
+$ nix build github:nagy/qemu-mcp-server
 #+end_example
 
 * More Information
