@@ -2,7 +2,8 @@
 #+author: Daniel Nagy
 #+language: en
 
-=qemu-mcp-server= is a Model Context Protocol (MCP) server to interact with QEMU instances.
+=qemu-mcp-server= is a Model Context Protocol (MCP) server to interact
+with QEMU instances over QEMU Machine Protocol (QMP).
 
 * Building
 
@@ -12,10 +13,78 @@ Quick building via Nix:
 $ nix build github:nagy/qemu-mcp-server
 #+end_example
 
+* Usage
+
+1. Launch QEMU with a QMP unix socket:
+
+#+begin_example
+$ qemu-system-x86_64 ... -qmp unix:/tmp/qmp-sock,server,nowait
+#+end_example
+
+2. Register the server in your MCP client. For a stdio-based client,
+add a JSON entry like this to its configuration:
+
+#+begin_src json
+{
+  "mcpServers": {
+    "qemu": {
+      "command": "qemu-mcp-server"
+    }
+  }
+}
+#+end_src
+
+The socket path defaults to =/tmp/qmp-sock= and can be overridden with
+the =QMP_SOCKET_PATH= environment variable, e.g.:
+
+#+begin_src json
+{
+  "mcpServers": {
+    "qemu": {
+      "command": "qemu-mcp-server",
+      "env": {
+        "QMP_SOCKET_PATH": "/run/user/1000/qmp-sock"
+      }
+    }
+  }
+}
+#+end_src
+
+* Tools
+
+** execute_qmp
+
+Execute a QMP command on the QEMU instance listening on the QMP unix
+socket.
+
+| Parameter        | Type   | Description                                             |
+|------------------+--------+---------------------------------------------------------|
+| =qmp_command=    | string | QMP command name, e.g. =query-status=                   |
+| =qmp_arguments=  | string | JSON object with the command's arguments (may be ={}=)  |
+
+Convenience commands: =query-status=, =stop=, =cont=, =eject=. Any
+other QMP command name is passed through to QEMU as-is.
+
+Example: to eject the medium of the CD-ROM drive:
+
+#+begin_src json
+{"qmp_command": "eject", "qmp_arguments": "{\"device\": \"ide-cd0\"}"}
+#+end_src
+
+* Security note
+
+Treat this server as full remote control of the VM: it can pause and
+resume the machine and access or eject drives. Anyone who can talk to
+the MCP server — or to the QMP socket itself — controls the VM. Use a
+per-user socket directory (e.g. under =$XDG_RUNTIME_DIR=) rather than a
+world-writable =/tmp= path shared between users.
+
 * More Information
 
 - https://qemu.org/
 - https://modelcontextprotocol.io/
+- QMP reference: =qemu-qmp-ref= shipped with QEMU, or
+  https://www.qemu.org/docs/master/interop/qemu-qmp-ref.html
 
 * License
 
