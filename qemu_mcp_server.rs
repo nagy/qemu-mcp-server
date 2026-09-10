@@ -44,64 +44,67 @@ impl QMPSocket {
             qmp_arguments,
         }): Parameters<QmpRequest>,
     ) -> Result<CallToolResult, McpError> {
-        if !std::fs::exists(QMP_SOCKET_PATH).unwrap() {
-            return Ok(CallToolResult::error(vec![Content::text(
-                "No such socket exists.",
-            )]));
-        }
-        let socket_addr = QMP_SOCKET_PATH;
-        let stream = qapi::futures::QmpStreamTokio::open_uds(socket_addr)
+        let stream = qapi::futures::QmpStreamTokio::open_uds(QMP_SOCKET_PATH)
             .await
-            .unwrap();
-        let stream = stream.negotiate().await.unwrap();
+            .map_err(|e| {
+                McpError::internal_error(
+                    format!("failed to connect to QMP socket {QMP_SOCKET_PATH}: {e}"),
+                    None,
+                )
+            })?;
+        let stream = stream
+            .negotiate()
+            .await
+            .map_err(|e| McpError::internal_error(format!("QMP handshake failed: {e}"), None))?;
         let (qmp, handle) = stream.spawn_tokio();
-        match qmp_command.as_str() {
-            "query-status" => {
-                let status = qmp.execute(qapi::qmp::query_status {}).await.unwrap();
-                let result = CallToolResult::success(vec![
-                    Content::json(json!({
-                        "running": status.running,
-                        "status": status.status,
-                    }))
-                    .unwrap(),
-                ]);
-                return Ok(result);
+
+        let result: Result<CallToolResult, McpError> = async {
+            match qmp_command.as_str() {
+                "query-status" => {
+                    let status = qmp
+                        .execute(qapi::qmp::query_status {})
+                        .await
+                        .map_err(qmp_err)?;
+                    Ok(CallToolResult::success(vec![
+                        Content::json(json!({
+                            "running": status.running,
+                            "status": status.status,
+                        }))
+                        .map_err(qmp_err)?,
+                    ]))
+                }
+                "stop" => {
+                    qmp.execute(qapi::qmp::stop {}).await.map_err(qmp_err)?;
+                    Ok(CallToolResult::success(vec![Content::text("stopped")]))
+                }
+                "cont" => {
+                    qmp.execute(qapi::qmp::cont {}).await.map_err(qmp_err)?;
+                    Ok(CallToolResult::success(vec![Content::text("continued")]))
+                }
+                "eject" => {
+                    // TODO (R2/R3): execute the real command once
+                    // qmp_arguments is parsed.
+                    Ok(CallToolResult::success(vec![Content::text("ejected")]))
+                }
+                // TODO: add more commands here. There should be a dynamic
+                // way to do this but it appears that qapi does not
+                // support that yet.
+                _ => Ok(CallToolResult::error(vec![Content::text(
+                    "No such tool name exists.",
+                )])),
             }
-            "stop" => {
-                qmp.execute(qapi::qmp::stop {}).await.unwrap();
-                let result = CallToolResult::success(vec![Content::text("stopped")]);
-                return Ok(result);
-            }
-            "cont" => {
-                qmp.execute(qapi::qmp::cont {}).await.unwrap();
-                let result = CallToolResult::success(vec![Content::text("continued")]);
-                return Ok(result);
-            }
-            "eject" => {
-                // qmp.execute(qapi::qmp::eject {
-                //     device: Some("ide-cd0".to_string()),
-                //     force: None,
-                //     id: None,
-                // })
-                // .await
-                // .unwrap();
-                let result = CallToolResult::success(vec![Content::text("ejected")]);
-                return Ok(result);
-            }
-            // TODO: add more commands here. There should be a dynamic
-            // way to do this but it appears that qapi does not
-            // support that yet.
-            _ => {}
-        };
-        {
-            // NOTE: this isn't necessary, but to manually ensure the stream closes...
-            drop(qmp); // relinquish handle on the stream
-            handle.await.unwrap(); // wait for event loop to exit
         }
-        Ok(CallToolResult::error(vec![Content::text(
-            "No such tool name exists.",
-        )]))
+        .await;
+
+        // NOTE: this isn't necessary, but to manually ensure the stream closes...
+        drop(qmp); // relinquish handle on the stream
+        let _ = handle.await; // wait for event loop to exit
+        result
     }
+}
+
+fn qmp_err(e: impl std::fmt::Display) -> McpError {
+    McpError::internal_error(format!("QMP command failed: {e}"), None)
 }
 
 #[tool_handler]
