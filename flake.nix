@@ -66,6 +66,7 @@
               homepage = "https://github.com/nagy/qemu-mcp-server";
               license = lib.licenses.agpl3Plus;
               mainProgram = "qemu-mcp-server";
+              maintainers = with lib.maintainers; [ nagy ];
             };
           };
         in
