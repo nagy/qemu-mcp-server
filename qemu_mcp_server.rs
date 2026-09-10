@@ -54,7 +54,7 @@ impl QMPSocket {
                 let result = CallToolResult::success(vec![
                     Content::json(json!({
                         "running": status.running,
-                        "status": format!("{:#?}", status.status),
+                        "status": status.status,
                     }))
                     .unwrap(),
                 ]);
