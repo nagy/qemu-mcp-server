@@ -19,3 +19,6 @@ tokio = { version = "1.47.1", features = ["process", "rt-multi-thread"] }
 [[bin]]
 name = "qemu-mcp-server"
 path = "qemu_mcp_server.rs"
+
+[lints.clippy]
+unwrap_used = "deny"

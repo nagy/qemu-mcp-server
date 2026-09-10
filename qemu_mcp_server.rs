@@ -45,7 +45,7 @@ impl QMPSocket {
         &self,
         Parameters(QmpRequest {
             qmp_command,
-            qmp_arguments,
+            qmp_arguments: _,
         }): Parameters<QmpRequest>,
     ) -> Result<CallToolResult, McpError> {
         let stream = qapi::futures::QmpStreamTokio::open_uds(&self.socket_path)
@@ -118,7 +118,6 @@ impl rmcp::ServerHandler for QMPSocket {
             server_info: rmcp::model::Implementation {
                 name: "qemu-mcp-server".into(),
                 version: env!("CARGO_PKG_VERSION").into(),
-                ..Default::default()
             },
             instructions: Some(
                 "Manage a QEMU virtual machine over its QMP socket. The socket must point at a \
