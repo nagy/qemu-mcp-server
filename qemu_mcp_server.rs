@@ -15,7 +15,7 @@ pub struct QMPSocket {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct MemoryRequest {
+pub struct QmpRequest {
     #[schemars(description = "The command name.")]
     pub qmp_command: String,
     #[schemars(description = "The arguments as JSON object.")]
@@ -29,13 +29,20 @@ impl QMPSocket {
             tool_router: Self::tool_router(),
         }
     }
-    #[tool(description = "You have access to one QMP socket only.")]
+    #[tool(
+        description = "Execute a QMP command on the QEMU instance listening on the local QMP unix \
+                       socket (/tmp/qmp-sock). Supports the convenience commands `query-status`, \
+                       `stop`, `cont`, and `eject`; any other value is passed through as a raw \
+                       QMP command. `qmp_command` is the QMP command name and `qmp_arguments` is \
+                       a JSON object with its arguments (e.g. `{\"device\": \"ide-cd0\"}` for \
+                       `eject`)."
+    )]
     async fn execute_qmp(
         &self,
-        Parameters(MemoryRequest {
+        Parameters(QmpRequest {
             qmp_command,
             qmp_arguments,
-        }): Parameters<MemoryRequest>,
+        }): Parameters<QmpRequest>,
     ) -> Result<CallToolResult, McpError> {
         if !std::fs::exists(QMP_SOCKET_PATH).unwrap() {
             return Ok(CallToolResult::error(vec![Content::text(
@@ -101,7 +108,16 @@ impl QMPSocket {
 impl rmcp::ServerHandler for QMPSocket {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
-            instructions: Some("QEMU machine manager".into()),
+            server_info: rmcp::model::Implementation {
+                name: "qemu-mcp-server".into(),
+                version: env!("CARGO_PKG_VERSION").into(),
+                ..Default::default()
+            },
+            instructions: Some(
+                "Manage a QEMU virtual machine over its QMP socket. The socket must point at a \
+                 running QEMU instance (launch QEMU with `-qmp unix:/tmp/qmp-sock,server,nowait`)."
+                    .into(),
+            ),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             ..Default::default()
         }
