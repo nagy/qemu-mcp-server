@@ -57,31 +57,39 @@ impl QMPSocket {
             qmp_arguments,
         }): Parameters<QmpRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let socket = UnixStream::connect(&self.socket_path).await.map_err(|e| {
-            McpError::internal_error(
-                format!("failed to connect to QMP socket {}: {e}", self.socket_path),
-                None,
-            )
-        })?;
-        let (read_half, mut write_half) = socket.into_split();
-        let mut reader = BufReader::new(read_half);
-
-        qmp_negotiate(&mut reader, &mut write_half).await?;
-        let result = qmp_execute(
-            &mut reader,
-            &mut write_half,
-            &qmp_command,
-            qmp_arguments.as_ref(),
-            1,
-        )
-        .await;
-        let _ = write_half.shutdown().await;
-        let ret = result?;
+        let ret = run_command(&self.socket_path, &qmp_command, qmp_arguments.as_ref()).await?;
 
         Ok(CallToolResult::success(vec![Content::json(ret).map_err(
             |e| McpError::internal_error(format!("failed to serialize QMP result: {e}"), None),
         )?]))
     }
+}
+
+/// Connect to the QMP socket, negotiate, and execute one command.
+///
+/// The connection is always shut down before returning, on success and
+/// on failure alike.
+async fn run_command(
+    socket_path: &str,
+    command: &str,
+    arguments: Option<&Value>,
+) -> Result<Value, McpError> {
+    let socket = UnixStream::connect(socket_path).await.map_err(|e| {
+        McpError::internal_error(
+            format!("failed to connect to QMP socket {socket_path}: {e}"),
+            None,
+        )
+    })?;
+    let (read_half, mut write_half) = socket.into_split();
+    let mut reader = BufReader::new(read_half);
+
+    let result = async {
+        qmp_negotiate(&mut reader, &mut write_half).await?;
+        qmp_execute(&mut reader, &mut write_half, command, arguments, 1).await
+    }
+    .await;
+    let _ = write_half.shutdown().await;
+    result
 }
 
 /// Read a single line from the QMP socket and parse it as JSON.
