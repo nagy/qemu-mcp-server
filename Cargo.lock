@@ -119,16 +119,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
-name = "errno"
-version = "0.3.14"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
-dependencies = [
- "libc",
- "windows-sys",
-]
-
-[[package]]
 name = "find-msvc-tools"
 version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -341,73 +331,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "qapi"
-version = "0.15.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b047adab56acc4948d4b9b58693c1f33fd13efef2d6bb5f0f66a47436ceada8"
-dependencies = [
- "bytes",
- "futures",
- "log",
- "memchr",
- "qapi-qmp",
- "qapi-spec",
- "serde",
- "serde_json",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
-name = "qapi-codegen"
-version = "0.11.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fb959fed63a69baa2e3ae57224d885e686bc3f56c9bb3b03406969980ea57a44"
-dependencies = [
- "qapi-parser",
-]
-
-[[package]]
-name = "qapi-parser"
-version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b37f643cfdf67a409a9323334138a11636a5db5d56cedcc780d7a82a7fb7659"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "qapi-qmp"
-version = "0.15.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "45303cac879d89361cad0287ae15f9ae1e7799b904b474152414aeece39b9875"
-dependencies = [
- "qapi-codegen",
- "qapi-spec",
- "serde",
-]
-
-[[package]]
-name = "qapi-spec"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "49e6bdbbe5d13015b21a49a778a29ae3cee9c450c3154e1648aed670d57fe5ba"
-dependencies = [
- "base64",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "qemu-mcp-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "qapi",
  "rmcp",
  "schemars",
  "serde",
+ "serde_json",
  "tokio",
 ]
 
@@ -567,16 +498,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
-name = "signal-hook-registry"
-version = "1.4.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b"
-dependencies = [
- "errno",
- "libc",
-]
-
-[[package]]
 name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -650,7 +571,6 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
- "signal-hook-registry",
  "socket2",
  "tokio-macros",
  "windows-sys",

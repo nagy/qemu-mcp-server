@@ -2,25 +2,35 @@ use rmcp::{
     ErrorData as McpError, ServiceExt,
     handler::server::tool::{Parameters, ToolRouter},
     model::{CallToolResult, Content, ServerCapabilities, ServerInfo},
-    serde_json::json,
     tool, tool_handler, tool_router,
     transport::stdio,
+};
+use serde_json::{Value, json};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    net::{
+        UnixStream,
+        unix::{OwnedReadHalf, OwnedWriteHalf},
+    },
 };
 
 const DEFAULT_QMP_SOCKET_PATH: &str = "/tmp/qmp-sock";
 
+/// MCP server exposing a QEMU instance's QMP socket.
 #[derive(Clone)]
 pub struct QMPSocket {
     tool_router: ToolRouter<Self>,
     socket_path: String,
 }
 
+/// Parameters of the `execute_qmp` tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct QmpRequest {
-    #[schemars(description = "The command name.")]
+    /// The QMP command name, e.g. `query-status` or `query-block`.
     pub qmp_command: String,
-    #[schemars(description = "The arguments as JSON object.")]
-    pub qmp_arguments: String,
+    /// The command arguments as a JSON object; omit for commands that
+    /// take no arguments.
+    pub qmp_arguments: Option<Value>,
 }
 
 #[tool_router]
@@ -35,80 +45,128 @@ impl QMPSocket {
     #[tool(
         description = "Execute a QMP command on the QEMU instance listening on the local QMP unix \
                        socket (default /tmp/qmp-sock, override with the QMP_SOCKET_PATH \
-                       environment variable). Supports the convenience commands `query-status`, \
-                       `stop`, `cont`, and `eject`; any other value is passed through as a raw \
-                       QMP command. `qmp_command` is the QMP command name and `qmp_arguments` is \
-                       a JSON object with its arguments (e.g. `{\"device\": \"ide-cd0\"}` for \
-                       `eject`)."
+                       environment variable). Any QMP command passes through, e.g. \
+                       `query-status`, `stop`, `cont`, `eject`, `query-block`. `qmp_command` is \
+                       the command name and `qmp_arguments` is an optional JSON object with its \
+                       arguments (e.g. {\"device\": \"ide-cd0\"} for `eject`)."
     )]
     async fn execute_qmp(
         &self,
         Parameters(QmpRequest {
             qmp_command,
-            qmp_arguments: _,
+            qmp_arguments,
         }): Parameters<QmpRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let stream = qapi::futures::QmpStreamTokio::open_uds(&self.socket_path)
-            .await
-            .map_err(|e| {
-                McpError::internal_error(
-                    format!("failed to connect to QMP socket {}: {e}", self.socket_path),
-                    None,
-                )
-            })?;
-        let stream = stream
-            .negotiate()
-            .await
-            .map_err(|e| McpError::internal_error(format!("QMP handshake failed: {e}"), None))?;
-        let (qmp, handle) = stream.spawn_tokio();
+        let socket = UnixStream::connect(&self.socket_path).await.map_err(|e| {
+            McpError::internal_error(
+                format!("failed to connect to QMP socket {}: {e}", self.socket_path),
+                None,
+            )
+        })?;
+        let (read_half, mut write_half) = socket.into_split();
+        let mut reader = BufReader::new(read_half);
 
-        let result: Result<CallToolResult, McpError> = async {
-            match qmp_command.as_str() {
-                "query-status" => {
-                    let status = qmp
-                        .execute(qapi::qmp::query_status {})
-                        .await
-                        .map_err(qmp_err)?;
-                    Ok(CallToolResult::success(vec![
-                        Content::json(json!({
-                            "running": status.running,
-                            "status": status.status,
-                        }))
-                        .map_err(qmp_err)?,
-                    ]))
-                }
-                "stop" => {
-                    qmp.execute(qapi::qmp::stop {}).await.map_err(qmp_err)?;
-                    Ok(CallToolResult::success(vec![Content::text("stopped")]))
-                }
-                "cont" => {
-                    qmp.execute(qapi::qmp::cont {}).await.map_err(qmp_err)?;
-                    Ok(CallToolResult::success(vec![Content::text("continued")]))
-                }
-                "eject" => {
-                    // TODO (R2/R3): execute the real command once
-                    // qmp_arguments is parsed.
-                    Ok(CallToolResult::success(vec![Content::text("ejected")]))
-                }
-                // TODO: add more commands here. There should be a dynamic
-                // way to do this but it appears that qapi does not
-                // support that yet.
-                _ => Ok(CallToolResult::error(vec![Content::text(
-                    "No such tool name exists.",
-                )])),
-            }
-        }
+        qmp_negotiate(&mut reader, &mut write_half).await?;
+        let result = qmp_execute(
+            &mut reader,
+            &mut write_half,
+            &qmp_command,
+            qmp_arguments.as_ref(),
+            1,
+        )
         .await;
+        let _ = write_half.shutdown().await;
+        let ret = result?;
 
-        // NOTE: this isn't necessary, but to manually ensure the stream closes...
-        drop(qmp); // relinquish handle on the stream
-        let _ = handle.await; // wait for event loop to exit
-        result
+        Ok(CallToolResult::success(vec![Content::json(ret).map_err(
+            |e| McpError::internal_error(format!("failed to serialize QMP result: {e}"), None),
+        )?]))
     }
 }
 
-fn qmp_err(e: impl std::fmt::Display) -> McpError {
-    McpError::internal_error(format!("QMP command failed: {e}"), None)
+/// Read a single line from the QMP socket and parse it as JSON.
+async fn qmp_read_message(reader: &mut BufReader<OwnedReadHalf>) -> Result<Value, McpError> {
+    let mut line = String::new();
+    let n = reader
+        .read_line(&mut line)
+        .await
+        .map_err(|e| McpError::internal_error(format!("QMP connection error: {e}"), None))?;
+    if n == 0 {
+        return Err(McpError::internal_error(
+            "QMP connection closed by QEMU",
+            None,
+        ));
+    }
+    serde_json::from_str(&line)
+        .map_err(|e| McpError::internal_error(format!("malformed QMP message: {e}"), None))
+}
+
+/// Send one QMP command and await its response, skipping asynchronous
+/// events.
+async fn qmp_execute(
+    reader: &mut BufReader<OwnedReadHalf>,
+    writer: &mut OwnedWriteHalf,
+    command: &str,
+    arguments: Option<&Value>,
+    id: u64,
+) -> Result<Value, McpError> {
+    let mut request = json!({ "execute": command, "id": id });
+    if let Some(arguments) = arguments {
+        request["arguments"] = arguments.clone();
+    }
+    writer
+        .write_all(format!("{request}\n").as_bytes())
+        .await
+        .map_err(|e| McpError::internal_error(format!("failed to send QMP command: {e}"), None))?;
+    writer
+        .flush()
+        .await
+        .map_err(|e| McpError::internal_error(format!("failed to send QMP command: {e}"), None))?;
+
+    loop {
+        let message = qmp_read_message(reader).await?;
+        if message.get("event").is_some() {
+            continue; // asynchronous event, not a response
+        }
+        if message.get("id").and_then(Value::as_u64) != Some(id) {
+            continue; // response to some other in-flight command
+        }
+        if let Some(error) = message.get("error") {
+            let class = error
+                .get("class")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let desc = error.get("desc").and_then(Value::as_str).unwrap_or("");
+            return Err(match class {
+                "CommandNotFound" => McpError::new(
+                    rmcp::model::ErrorCode::METHOD_NOT_FOUND,
+                    format!("QMP command not found: {command}"),
+                    None,
+                ),
+                _ => McpError::invalid_params(format!("QMP error ({class}): {desc}"), None),
+            });
+        }
+        if let Some(ret) = message.get("return") {
+            return Ok(ret.clone());
+        }
+    }
+}
+
+/// Perform the QMP handshake: read the greeting and complete
+/// `qmp_capabilities` negotiation.
+async fn qmp_negotiate(
+    reader: &mut BufReader<OwnedReadHalf>,
+    writer: &mut OwnedWriteHalf,
+) -> Result<(), McpError> {
+    let greeting = qmp_read_message(reader).await?;
+    if !greeting.get("QMP").is_some() {
+        return Err(McpError::internal_error(
+            format!("expected QMP greeting, got: {greeting}"),
+            None,
+        ));
+    }
+    qmp_execute(reader, writer, "qmp_capabilities", None, 0).await?;
+    Ok(())
 }
 
 #[tool_handler]
