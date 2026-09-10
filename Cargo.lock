@@ -409,7 +409,6 @@ dependencies = [
  "schemars",
  "serde",
  "tokio",
- "tracing",
 ]
 
 [[package]]
