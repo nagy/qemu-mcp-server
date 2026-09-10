@@ -7,11 +7,12 @@ use rmcp::{
     transport::stdio,
 };
 
-pub const QMP_SOCKET_PATH: &'static str = "/tmp/qmp-sock";
+const DEFAULT_QMP_SOCKET_PATH: &str = "/tmp/qmp-sock";
 
 #[derive(Clone)]
 pub struct QMPSocket {
     tool_router: ToolRouter<Self>,
+    socket_path: String,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -27,11 +28,14 @@ impl QMPSocket {
     fn new() -> Self {
         Self {
             tool_router: Self::tool_router(),
+            socket_path: std::env::var("QMP_SOCKET_PATH")
+                .unwrap_or_else(|_| DEFAULT_QMP_SOCKET_PATH.to_owned()),
         }
     }
     #[tool(
         description = "Execute a QMP command on the QEMU instance listening on the local QMP unix \
-                       socket (/tmp/qmp-sock). Supports the convenience commands `query-status`, \
+                       socket (default /tmp/qmp-sock, override with the QMP_SOCKET_PATH \
+                       environment variable). Supports the convenience commands `query-status`, \
                        `stop`, `cont`, and `eject`; any other value is passed through as a raw \
                        QMP command. `qmp_command` is the QMP command name and `qmp_arguments` is \
                        a JSON object with its arguments (e.g. `{\"device\": \"ide-cd0\"}` for \
@@ -44,11 +48,11 @@ impl QMPSocket {
             qmp_arguments,
         }): Parameters<QmpRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let stream = qapi::futures::QmpStreamTokio::open_uds(QMP_SOCKET_PATH)
+        let stream = qapi::futures::QmpStreamTokio::open_uds(&self.socket_path)
             .await
             .map_err(|e| {
                 McpError::internal_error(
-                    format!("failed to connect to QMP socket {QMP_SOCKET_PATH}: {e}"),
+                    format!("failed to connect to QMP socket {}: {e}", self.socket_path),
                     None,
                 )
             })?;
