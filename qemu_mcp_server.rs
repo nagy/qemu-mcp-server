@@ -101,6 +101,15 @@ async fn qmp_read_message(reader: &mut BufReader<OwnedReadHalf>) -> Result<Value
         .map_err(|e| McpError::internal_error(format!("malformed QMP message: {e}"), None))
 }
 
+/// Build the JSON wire request for one QMP command.
+fn qmp_request(command: &str, arguments: Option<&Value>, id: u64) -> Value {
+    let mut request = json!({ "execute": command, "id": id });
+    if let Some(arguments) = arguments {
+        request["arguments"] = arguments.clone();
+    }
+    request
+}
+
 /// Send one QMP command and await its response, skipping asynchronous
 /// events.
 async fn qmp_execute(
@@ -110,10 +119,7 @@ async fn qmp_execute(
     arguments: Option<&Value>,
     id: u64,
 ) -> Result<Value, McpError> {
-    let mut request = json!({ "execute": command, "id": id });
-    if let Some(arguments) = arguments {
-        request["arguments"] = arguments.clone();
-    }
+    let request = qmp_request(command, arguments, id);
     writer
         .write_all(format!("{request}\n").as_bytes())
         .await
@@ -194,4 +200,222 @@ async fn main() -> anyhow::Result<()> {
     let service = server.serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use rmcp::model::ErrorCode;
+    use tokio::{io::AsyncWriteExt, net::UnixListener};
+
+    use super::*;
+
+    #[test]
+    fn request_without_arguments_omits_the_field() {
+        assert_eq!(
+            qmp_request("query-status", None, 7),
+            json!({ "execute": "query-status", "id": 7 })
+        );
+    }
+
+    #[test]
+    fn request_embeds_arguments() {
+        let args = json!({ "device": "ide-cd0" });
+        assert_eq!(
+            qmp_request("eject", Some(&args), 1),
+            json!({ "execute": "eject", "id": 1, "arguments": { "device": "ide-cd0" } })
+        );
+    }
+
+    /// One scripted fake-QEMU server action: either push an
+    /// unsolicited event, or read one request and answer with a canned
+    /// response (the request's `id` is filled in automatically).
+    enum Step {
+        Event(Value),
+        Respond(Value),
+    }
+
+    /// Fake QEMU: greeting, then scripted steps, then drain remaining
+    /// requests until the client disconnects.
+    async fn serve(listener: UnixListener, steps: Vec<Step>) {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        write_half
+            .write_all(
+                concat!(
+                    r#"{"QMP": {"version": {"qemu": {"micro": 0, "minor": 0, "major": 0}, "#,
+                    r#""package": "fake"}}, "capabilities": []}"#,
+                    "\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        for step in steps {
+            match step {
+                Step::Event(event) => {
+                    write_half
+                        .write_all(format!("{event}\n").as_bytes())
+                        .await
+                        .unwrap();
+                }
+                Step::Respond(mut response) => {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).await.unwrap();
+                    let request: Value = serde_json::from_str(&line).unwrap();
+                    response["id"] = request["id"].clone();
+                    write_half
+                        .write_all(format!("{response}\n").as_bytes())
+                        .await
+                        .unwrap();
+                }
+            }
+        }
+        let mut line = String::new();
+        while reader.read_line(&mut line).await.unwrap() > 0 {
+            line.clear();
+        }
+    }
+
+    fn socket_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("qemu-mcp-server-test-{name}.sock"))
+    }
+
+    async fn bind(name: &str) -> (UnixListener, std::path::PathBuf) {
+        let path = socket_path(name);
+        let _ = std::fs::remove_file(&path);
+        (UnixListener::bind(&path).unwrap(), path)
+    }
+
+    async fn connect(path: &std::path::Path) -> (BufReader<OwnedReadHalf>, OwnedWriteHalf) {
+        let socket = UnixStream::connect(path).await.unwrap();
+        let (read_half, write_half) = socket.into_split();
+        (BufReader::new(read_half), write_half)
+    }
+
+    #[tokio::test]
+    async fn passthrough_roundtrip_with_negotiation() {
+        let (listener, path) = bind("roundtrip").await;
+        let server = tokio::spawn(serve(
+            listener,
+            vec![
+                Step::Respond(json!({ "return": {} })),
+                Step::Respond(json!({ "return": { "running": true, "status": "running" } })),
+            ],
+        ));
+        let (mut reader, mut writer) = connect(&path).await;
+        qmp_negotiate(&mut reader, &mut writer).await.unwrap();
+        let ret = qmp_execute(&mut reader, &mut writer, "query-status", None, 1)
+            .await
+            .unwrap();
+        assert_eq!(ret, json!({ "running": true, "status": "running" }));
+        drop(reader);
+        drop(writer);
+        server.await.unwrap();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn asynchronous_events_are_skipped() {
+        let (listener, path) = bind("events").await;
+        let server = tokio::spawn(serve(
+            listener,
+            vec![
+                Step::Respond(json!({ "return": {} })),
+                Step::Event(json!({ "event": "RESET", "data": {} })),
+                Step::Respond(json!({ "return": { "status": "paused" } })),
+            ],
+        ));
+        let (mut reader, mut writer) = connect(&path).await;
+        qmp_negotiate(&mut reader, &mut writer).await.unwrap();
+        let ret = qmp_execute(&mut reader, &mut writer, "query-status", None, 1)
+            .await
+            .unwrap();
+        assert_eq!(ret, json!({ "status": "paused" }));
+        drop(reader);
+        drop(writer);
+        server.await.unwrap();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn command_not_found_maps_to_method_not_found() {
+        let (listener, path) = bind("command-not-found").await;
+        let server = tokio::spawn(serve(
+            listener,
+            vec![
+                Step::Respond(json!({ "return": {} })),
+                Step::Respond(json!({
+                    "error": {
+                        "class": "CommandNotFound",
+                        "desc": "The command frobnicate has not been found"
+                    }
+                })),
+            ],
+        ));
+        let (mut reader, mut writer) = connect(&path).await;
+        qmp_negotiate(&mut reader, &mut writer).await.unwrap();
+        let err = qmp_execute(&mut reader, &mut writer, "frobnicate", None, 1)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::METHOD_NOT_FOUND);
+        assert!(err.message.contains("frobnicate"));
+        drop(reader);
+        drop(writer);
+        server.await.unwrap();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn qmp_error_maps_to_invalid_params() {
+        let (listener, path) = bind("device-not-found").await;
+        let server = tokio::spawn(serve(
+            listener,
+            vec![
+                Step::Respond(json!({ "return": {} })),
+                Step::Respond(json!({
+                    "error": {
+                        "class": "DeviceNotFound",
+                        "desc": "Device 'ide-cd0' not found"
+                    }
+                })),
+            ],
+        ));
+        let (mut reader, mut writer) = connect(&path).await;
+        qmp_negotiate(&mut reader, &mut writer).await.unwrap();
+        let err = qmp_execute(
+            &mut reader,
+            &mut writer,
+            "eject",
+            Some(&json!({ "device": "ide-cd0" })),
+            1,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
+        assert!(err.message.contains("DeviceNotFound"));
+        assert!(err.message.contains("ide-cd0"));
+        drop(reader);
+        drop(writer);
+        server.await.unwrap();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn negotiate_rejects_a_bad_greeting() {
+        let (listener, path) = bind("bad-greeting").await;
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (_, mut write_half) = stream.into_split();
+            write_half.write_all(b"{\"hello\": true}\n").await.unwrap();
+        });
+        let (mut reader, mut writer) = connect(&path).await;
+        let err = qmp_negotiate(&mut reader, &mut writer).await.unwrap_err();
+        assert!(err.message.contains("expected QMP greeting"));
+        drop(reader);
+        drop(writer);
+        server.await.unwrap();
+        let _ = std::fs::remove_file(&path);
+    }
 }
