@@ -71,12 +71,44 @@ Example: to eject the medium of the CD-ROM drive:
 {"qmp_command": "eject", "qmp_arguments": "{\"device\": \"ide-cd0\"}"}
 #+end_src
 
+** read_serial
+
+Read pending output from the guest's serial console. Requires QEMU to
+listen on a serial unix socket, e.g. =-serial
+unix:/tmp/serial-sock,server,nowait=. The server stays connected in
+the background and buffers everything the guest prints between calls,
+so nothing is lost while no read is in flight.
+
+| Parameter    | Type   | Description                                                        |
+|--------------+--------+--------------------------------------------------------------------|
+| =wait_for=   | string | Keep polling until this substring appears in the output (optional) |
+| =timeout_ms= | number | Give up waiting after this many milliseconds (default 5000)        |
+| =max_chars=  | number | Return at most this many characters from the end of the buffer     |
+| =clear=      | bool   | Discard the buffered output after returning it                     |
+
+Output is returned as lossy UTF-8.
+
+** write_serial
+
+Write data to the guest's serial console, i.e. simulate typing into
+its UART. Combine with =read_serial= (=wait_for= on an expected
+prompt) to drive interactive guest programs.
+
+| Parameter | Type   | Description                                       |
+|-----------+--------+---------------------------------------------------|
+| =data=    | string | Bytes to send to the guest's serial port          |
+| =newline= | bool   | Append a newline after =data= (default =true=)    |
+
+The serial socket path defaults to =/tmp/serial-sock= and can be
+overridden with the =SERIAL_SOCKET_PATH= environment variable.
+
 * Security note
 
 Treat this server as full remote control of the VM: it can pause and
-resume the machine and access or eject drives. Anyone who can talk to
-the MCP server — or to the QMP socket itself — controls the VM. Use a
-per-user socket directory (e.g. under =$XDG_RUNTIME_DIR=) rather than a
+resume the machine, access or eject drives, and interact with the
+guest's serial console. Anyone who can talk to the MCP server — or to
+the QMP or serial socket itself — controls the VM. Use a per-user
+socket directory (e.g. under =$XDG_RUNTIME_DIR=) rather than a
 world-writable =/tmp= path shared between users.
 
 * More Information
