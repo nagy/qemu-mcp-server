@@ -23,6 +23,9 @@ use tokio::{
 
 const DEFAULT_QMP_SOCKET_PATH: &str = "/tmp/qmp-sock";
 const DEFAULT_SERIAL_SOCKET_PATH: &str = "/tmp/serial-sock";
+/// Upper bound on how long a single QMP command may take; a wedged
+/// QEMU or socket surfaces a tool error instead of hanging forever.
+const DEFAULT_QMP_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_SERIAL_TIMEOUT_MS: u64 = 5000;
 const DEFAULT_SERIAL_MAX_CHARS: usize = 4000;
 /// Upper bound on buffered serial output; older bytes are dropped.
@@ -159,9 +162,19 @@ impl QMPSocket {
                        environment variable). Any QMP command passes through, e.g. \
                        `query-status`, `stop`, `cont`, `eject`, `query-block`. `qmp_command` is \
                        the command name and `qmp_arguments` is an optional JSON object with its \
-                       arguments (e.g. {\"device\": \"ide-cd0\"} for `eject`)."
+                       arguments (e.g. {\"device\": \"ide-cd0\"} for `eject`). Because this is a \
+                       passthrough, the schema cannot say which commands mutate the VM; `stop`, \
+                       `eject`, `migrate`, and friends change guest or drive state. Fails after \
+                       30 seconds if QEMU does not answer. Each call opens a fresh QMP \
+                       connection, so repeated calls are safe.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
-    async fn execute_qmp(
+    async fn qemu_execute_qmp(
         &self,
         Parameters(QmpRequest {
             qmp_command,
@@ -186,9 +199,16 @@ impl QMPSocket {
                        elapses. Without `wait_for`, returns the buffered output immediately \
                        (possibly empty). Output is returned as lossy UTF-8, capped at `max_chars` \
                        (default 4000) from the end of the buffer; pass `clear` to discard it \
-                       after reading."
+                       after reading. Read-only with respect to the guest, but not idempotent: \
+                       each call consumes buffered output.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
-    async fn read_serial(
+    async fn qemu_read_serial(
         &self,
         Parameters(request): Parameters<SerialReadRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -228,11 +248,18 @@ impl QMPSocket {
 
     #[tool(
         description = "Write data to the guest's serial console (simulate typing into its UART \
-                       over the same unix socket as `read_serial`). A newline is appended unless \
-                       `newline` is false. Combine with `read_serial` (`wait_for` on an expected \
-                       prompt) to drive interactive guest programs."
+                       over the same unix socket as `qemu_read_serial`). A newline is appended \
+                       unless `newline` is false. Not idempotent: sending the same data twice \
+                       sends it to the guest twice. Combine with `qemu_read_serial` (`wait_for` \
+                       on an expected prompt) to drive interactive guest programs.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
-    async fn write_serial(
+    async fn qemu_write_serial(
         &self,
         Parameters(request): Parameters<SerialWriteRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -243,7 +270,10 @@ impl QMPSocket {
         }
         let mut state = self.serial.lock().await;
         let writer = state.writer.as_mut().ok_or_else(|| {
-            McpError::internal_error("serial connection lost, retry the call", None)
+            McpError::internal_error(
+                "serial connection lost; retry the call (reconnects automatically)",
+                None,
+            )
         })?;
         writer.write_all(&payload).await.map_err(|e| {
             McpError::internal_error(format!("failed to write to serial socket: {e}"), None)
@@ -266,8 +296,9 @@ impl QMPSocket {
             .map_err(|e| {
                 McpError::internal_error(
                     format!(
-                        "failed to connect to serial socket {}: {e}",
-                        self.serial_socket_path
+                        "failed to connect to serial socket {}: {e}; launch QEMU with `-serial \
+                         unix:{},server,nowait` or override SERIAL_SOCKET_PATH",
+                        self.serial_socket_path, self.serial_socket_path
                     ),
                     None,
                 )
@@ -324,18 +355,57 @@ impl QMPSocket {
     }
 }
 
-/// Connect to the QMP socket, negotiate, and execute one command.
-///
-/// The connection is always shut down before returning, on success and
-/// on failure alike.
+/// Connect to the QMP socket, negotiate, and execute one command,
+/// bounded by `DEFAULT_QMP_TIMEOUT_MS`.
 async fn run_command(
+    socket_path: &str,
+    command: &str,
+    arguments: Option<&Value>,
+) -> Result<Value, McpError> {
+    run_command_with_timeout(
+        socket_path,
+        command,
+        arguments,
+        Duration::from_millis(DEFAULT_QMP_TIMEOUT_MS),
+    )
+    .await
+}
+
+/// The connection is always shut down before returning, on success and
+/// on failure alike. The whole round trip is bounded by `timeout` so a
+/// wedged QEMU surfaces a tool error instead of hanging the agent's
+/// request forever.
+async fn run_command_with_timeout(
+    socket_path: &str,
+    command: &str,
+    arguments: Option<&Value>,
+    timeout: Duration,
+) -> Result<Value, McpError> {
+    tokio::time::timeout(timeout, run_command_once(socket_path, command, arguments))
+        .await
+        .map_err(|_| {
+            McpError::internal_error(
+                format!(
+                    "QMP command {command:?} timed out after {} ms; the socket connected but QEMU \
+                     did not answer (paused process? overloaded VM? wedged monitor?)",
+                    timeout.as_millis()
+                ),
+                None,
+            )
+        })?
+}
+
+async fn run_command_once(
     socket_path: &str,
     command: &str,
     arguments: Option<&Value>,
 ) -> Result<Value, McpError> {
     let socket = UnixStream::connect(socket_path).await.map_err(|e| {
         McpError::internal_error(
-            format!("failed to connect to QMP socket {socket_path}: {e}"),
+            format!(
+                "failed to connect to QMP socket {socket_path}: {e}; launch QEMU with `-qmp \
+                 unix:{socket_path},server,nowait` or override QMP_SOCKET_PATH"
+            ),
             None,
         )
     })?;
@@ -672,6 +742,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn qmp_command_times_out_when_qemu_never_answers() {
+        let (listener, path) = bind("qmp-timeout").await;
+        let fake = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (_, mut write_half) = stream.into_split();
+            // Greet, then ignore the capabilities negotiation.
+            write_half
+                .write_all(
+                    concat!(
+                        r#"{"QMP": {"version": {"qemu": {"micro": 0, "minor": 0, "major": 0}, "#,
+                        r#""package": "fake"}}, "capabilities": []}"#,
+                        "\n"
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            // Keep the connection open; never answer.
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+
+        let err = run_command_with_timeout(
+            &path.display().to_string(),
+            "query-status",
+            None,
+            Duration::from_millis(200),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.message.contains("timed out"));
+        assert!(err.message.contains("query-status"));
+
+        fake.abort();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
     async fn negotiate_rejects_a_bad_greeting() {
         let (listener, path) = bind("bad-greeting").await;
         let server = tokio::spawn(async move {
@@ -744,7 +851,7 @@ mod tests {
         let server = server_with_paths(&qmp_path, &serial_path);
 
         let result = server
-            .read_serial(Parameters(serial_read_request(Some("Boot OK"))))
+            .qemu_read_serial(Parameters(serial_read_request(Some("Boot OK"))))
             .await
             .unwrap();
         let text = result_text(result);
@@ -755,10 +862,10 @@ mod tests {
             data: "help".to_owned(),
             newline: None,
         };
-        server.write_serial(Parameters(request)).await.unwrap();
+        server.qemu_write_serial(Parameters(request)).await.unwrap();
 
         let result = server
-            .read_serial(Parameters(serial_read_request(Some("echo: hi"))))
+            .qemu_read_serial(Parameters(serial_read_request(Some("echo: hi"))))
             .await
             .unwrap();
         let text = result_text(result);
@@ -783,7 +890,7 @@ mod tests {
         let server = server_with_paths(&qmp_path, &serial_path);
 
         let err = server
-            .read_serial(Parameters(serial_read_request(Some("never printed"))))
+            .qemu_read_serial(Parameters(serial_read_request(Some("never printed"))))
             .await
             .unwrap_err();
         assert!(err.message.contains("timed out"));
@@ -812,10 +919,10 @@ mod tests {
 
         let mut request = serial_read_request(Some("one two"));
         request.clear = Some(true);
-        server.read_serial(Parameters(request)).await.unwrap();
+        server.qemu_read_serial(Parameters(request)).await.unwrap();
 
         let result = server
-            .read_serial(Parameters(serial_read_request(None)))
+            .qemu_read_serial(Parameters(serial_read_request(None)))
             .await
             .unwrap();
         assert_eq!(result_text(result), "");

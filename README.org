@@ -52,7 +52,7 @@ the =QMP_SOCKET_PATH= environment variable, e.g.:
 
 * Tools
 
-** execute_qmp
+** qemu_execute_qmp
 
 Execute a QMP command on the QEMU instance listening on the QMP unix
 socket.
@@ -63,7 +63,9 @@ socket.
 | =qmp_arguments=  | string | JSON object with the command's arguments (may be ={}=)  |
 
 Convenience commands: =query-status=, =stop=, =cont=, =eject=. Any
-other QMP command name is passed through to QEMU as-is.
+other QMP command name is passed through to QEMU as-is. Each call
+opens a fresh QMP connection and fails after 30 seconds if QEMU does
+not answer.
 
 Example: to eject the medium of the CD-ROM drive:
 
@@ -71,7 +73,7 @@ Example: to eject the medium of the CD-ROM drive:
 {"qmp_command": "eject", "qmp_arguments": "{\"device\": \"ide-cd0\"}"}
 #+end_src
 
-** read_serial
+** qemu_read_serial
 
 Read pending output from the guest's serial console. Requires QEMU to
 listen on a serial unix socket, e.g. =-serial
@@ -88,10 +90,10 @@ so nothing is lost while no read is in flight.
 
 Output is returned as lossy UTF-8.
 
-** write_serial
+** qemu_write_serial
 
 Write data to the guest's serial console, i.e. simulate typing into
-its UART. Combine with =read_serial= (=wait_for= on an expected
+its UART. Combine with =qemu_read_serial= (=wait_for= on an expected
 prompt) to drive interactive guest programs.
 
 | Parameter | Type   | Description                                       |
