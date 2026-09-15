@@ -7,6 +7,10 @@ Guidance for AI coding agents working in this repository.
 `qemu-mcp-server` — a Rust binary exposing QEMU instances over the Model
 Context Protocol (MCP) via QMP. Implementation lives in `src/lib.rs`;
 `src/main.rs` is a thin binary wrapper around `qemu_mcp_server::run()`.
+Design decisions, hardening notes, and future work: `MCP_PLAN.md`.
+Tool names follow the `{service}_{action}` convention with a `qemu_`
+prefix (`qemu_execute_qmp`, `qemu_read_serial`, `qemu_write_serial`);
+keep the prefix for new tools.
 
 ## Build & test
 
