@@ -51,6 +51,26 @@ struct SerialState {
 }
 
 /// Parameters of the `execute_qmp` tool.
+///
+/// # Examples
+///
+/// ```
+/// use qemu_mcp_server::QmpRequest;
+/// use serde_json::json;
+///
+/// let request: QmpRequest = serde_json::from_value(json!({
+///     "qmp_command": "eject",
+///     "qmp_arguments": { "device": "ide-cd0" }
+/// }))
+/// .unwrap();
+/// assert_eq!(request.qmp_command, "eject");
+/// assert_eq!(request.qmp_arguments, Some(json!({ "device": "ide-cd0" })));
+///
+/// // `qmp_arguments` may be omitted for commands that take no arguments.
+/// let bare: QmpRequest =
+///     serde_json::from_value(json!({ "qmp_command": "query-status" })).unwrap();
+/// assert_eq!(bare.qmp_arguments, None);
+/// ```
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct QmpRequest {
     /// The QMP command name, e.g. `query-status` or `query-block`.
@@ -61,6 +81,27 @@ pub struct QmpRequest {
 }
 
 /// Parameters of the `read_serial` tool.
+///
+/// # Examples
+///
+/// ```
+/// use qemu_mcp_server::SerialReadRequest;
+/// use serde_json::json;
+///
+/// let request: SerialReadRequest =
+///     serde_json::from_value(json!({ "wait_for": "login:", "timeout_ms": 10_000 }))
+///         .unwrap();
+/// assert_eq!(request.wait_for.as_deref(), Some("login:"));
+/// assert_eq!(request.timeout_ms, Some(10_000));
+///
+/// // Omitted fields fall back to the tool's defaults: no substring
+/// // filter, 5000 ms timeout, 4000 chars, buffer kept.
+/// let defaults: SerialReadRequest = serde_json::from_value(json!({})).unwrap();
+/// assert_eq!(defaults.wait_for, None);
+/// assert_eq!(defaults.timeout_ms, None);
+/// assert_eq!(defaults.max_chars, None);
+/// assert_eq!(defaults.clear, None);
+/// ```
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct SerialReadRequest {
     /// Keep polling until this substring appears in the output, or give
@@ -75,6 +116,23 @@ pub struct SerialReadRequest {
 }
 
 /// Parameters of the `write_serial` tool.
+///
+/// # Examples
+///
+/// ```
+/// use qemu_mcp_server::SerialWriteRequest;
+/// use serde_json::json;
+///
+/// let request: SerialWriteRequest =
+///     serde_json::from_value(json!({ "data": "ls -l" })).unwrap();
+/// assert_eq!(request.data, "ls -l");
+/// // `newline` omitted means "append a newline" (the tool's default).
+/// assert_eq!(request.newline, None);
+///
+/// let raw: SerialWriteRequest =
+///     serde_json::from_value(json!({ "data": "ls -l\n", "newline": false })).unwrap();
+/// assert_eq!(raw.newline, Some(false));
+/// ```
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct SerialWriteRequest {
     /// Bytes to send to the guest's serial port, e.g. a command line.

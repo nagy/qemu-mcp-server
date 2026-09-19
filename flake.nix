@@ -69,10 +69,40 @@
               maintainers = with lib.maintainers; [ nagy ];
             };
           };
+
+          # Static rustdoc HTML (what `cargo doc` writes to ./target/doc/)
+          # installed under $out/share/doc. Reuses the same cargoArtifacts,
+          # so only doc crates compile; --no-deps (crane's default) keeps
+          # third-party crates out of the search index. Browse offline:
+          # nix run nixpkgs#python3 -- -m http.server -d <doc-out>/share/doc
+          docs = craneLib.cargoDoc {
+            inherit
+              src
+              cargoArtifacts
+              nativeBuildInputs
+              env
+              ;
+            buildInputs = libInputs;
+            meta.description = "QEMU MCP server API documentation";
+          };
+
+          # Doctests: code blocks in doc comments compiled and run against
+          # the library (`cargo test --doc`), same artifact set as above.
+          doctests = craneLib.cargoDocTest {
+            inherit
+              src
+              cargoArtifacts
+              nativeBuildInputs
+              env
+              ;
+            buildInputs = libInputs;
+            meta.description = "QEMU MCP server doctest suite";
+          };
         in
         {
           packages.qemu-mcp-server = pkg;
           packages.default = config.packages.qemu-mcp-server;
+          packages.qemu-mcp-server-doc = docs;
 
           checks.default = craneLib.cargoTest {
             inherit
@@ -82,7 +112,10 @@
               env
               ;
             buildInputs = libInputs;
+            meta.description = "QEMU MCP server test suite";
           };
+
+          checks.doctests = doctests;
 
           apps.default = {
             type = "app";
