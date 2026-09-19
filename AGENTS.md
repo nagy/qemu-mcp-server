@@ -17,9 +17,10 @@ Nix flake (no default.nix anymore):
 nix flake check   # builds the package and runs cargo tests + doctests
 nix build         # build the binary into ./result
 nix fmt           # format flake, Rust, and TOML via treefmt (never run formatters standalone)
-nix develop       # dev shell with cargo
 nix build .#qemu-mcp-server-doc  # static rustdoc HTML in result/share/doc
 ```
+
+Dev shell provides cargo (`nix develop`).
 
 ## Conventions
 
