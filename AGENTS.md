@@ -5,9 +5,8 @@ Guidance for AI coding agents working in this repository.
 ## Project
 
 `qemu-mcp-server` — a Rust binary exposing QEMU instances over the Model
-Context Protocol (MCP) via QMP. Implementation lives in `qemu_mcp_server.rs`;
-`src/lib.rs` is a thin shim (`#[path]` include + re-exports) that gives the
-crate a lib target so doctests can run.
+Context Protocol (MCP) via QMP. Implementation lives in `src/lib.rs`;
+`src/main.rs` is a thin binary wrapper around `qemu_mcp_server::run()`.
 
 ## Build & test
 
