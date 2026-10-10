@@ -8,6 +8,11 @@ Guidance for AI coding agents working in this repository.
 Context Protocol (MCP) via QMP. Implementation lives in `src/lib.rs`;
 `src/main.rs` is a thin binary wrapper around `qemu_mcp_server::run()`.
 
+`src/lib.rs` is a usable library target, not only a test home. External
+callers build a server with `QMPSocket::with_paths` (explicit socket
+paths) or `QMPSocket::new` (paths from environment), then serve it on
+any rmcp transport. `run()` is the stdio convenience entry point.
+
 ## Build & test
 
 Nix flake (no default.nix anymore):

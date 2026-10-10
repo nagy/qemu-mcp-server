@@ -143,13 +143,35 @@ pub struct SerialWriteRequest {
 
 #[tool_router]
 impl QMPSocket {
-    fn new() -> Self {
+    /// Build a server that reads `QMP_SOCKET_PATH` and
+    /// `SERIAL_SOCKET_PATH`, or the default socket paths when an
+    /// environment variable is unset.
+    pub fn new() -> Self {
+        Self::with_paths(
+            std::env::var("QMP_SOCKET_PATH").unwrap_or_else(|_| DEFAULT_QMP_SOCKET_PATH.to_owned()),
+            std::env::var("SERIAL_SOCKET_PATH")
+                .unwrap_or_else(|_| DEFAULT_SERIAL_SOCKET_PATH.to_owned()),
+        )
+    }
+
+    /// Build a server that uses the given QMP and serial socket paths.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use qemu_mcp_server::QMPSocket;
+    ///
+    /// let server = QMPSocket::with_paths("/tmp/qmp-sock", "/tmp/serial-sock");
+    /// let _ = server;
+    /// ```
+    pub fn with_paths(
+        qmp_socket_path: impl Into<String>,
+        serial_socket_path: impl Into<String>,
+    ) -> Self {
         Self {
             tool_router: Self::tool_router(),
-            socket_path: std::env::var("QMP_SOCKET_PATH")
-                .unwrap_or_else(|_| DEFAULT_QMP_SOCKET_PATH.to_owned()),
-            serial_socket_path: std::env::var("SERIAL_SOCKET_PATH")
-                .unwrap_or_else(|_| DEFAULT_SERIAL_SOCKET_PATH.to_owned()),
+            socket_path: qmp_socket_path.into(),
+            serial_socket_path: serial_socket_path.into(),
             serial: Arc::new(Mutex::new(SerialState::default())),
         }
     }
@@ -463,7 +485,11 @@ impl rmcp::ServerHandler for QMPSocket {
     }
 }
 
-/// Entry point for the `qemu-mcp-server` binary.
+/// Run the server on stdio using [`QMPSocket::new`].
+///
+/// This is the entry point for the `qemu-mcp-server` binary. Callers
+/// that need custom socket paths or a different transport construct
+/// [`QMPSocket`] directly and use [`rmcp::ServiceExt::serve`].
 pub async fn run() -> anyhow::Result<()> {
     let server = QMPSocket::new();
     let service = server.serve(stdio()).await?;
@@ -690,12 +716,7 @@ mod tests {
 
     /// Build a server instance wired to the given test socket paths.
     fn server_with_paths(qmp: &std::path::Path, serial: &std::path::Path) -> QMPSocket {
-        QMPSocket {
-            tool_router: QMPSocket::tool_router(),
-            socket_path: qmp.display().to_string(),
-            serial_socket_path: serial.display().to_string(),
-            serial: Arc::new(Mutex::new(SerialState::default())),
-        }
+        QMPSocket::with_paths(qmp.display().to_string(), serial.display().to_string())
     }
 
     fn serial_read_request(wait_for: Option<&str>) -> SerialReadRequest {
