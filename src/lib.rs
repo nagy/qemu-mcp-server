@@ -1,3 +1,15 @@
+//! MCP server that exposes a QEMU instance over QMP and its serial console.
+//!
+//! Build one [`QMPSocket`] value and serve it on any rmcp transport. The
+//! [`run`] function is the stdio entry point used by the binary.
+//!
+//! QEMU must listen on two unix sockets, for example:
+//!
+//! ```text
+//! qemu-system-x86_64 -qmp unix:/tmp/qmp-sock,server,nowait \
+//!     -serial unix:/tmp/serial-sock,server,nowait
+//! ```
+
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -31,6 +43,8 @@ const SERIAL_BUFFER_LIMIT: usize = 256 * 1024;
 const SERIAL_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// MCP server exposing a QEMU instance's QMP socket and serial console.
+///
+/// This type does not implement `Debug`, because [`ToolRouter`] does not.
 #[derive(Clone)]
 pub struct QMPSocket {
     tool_router: ToolRouter<Self>,
@@ -71,12 +85,13 @@ struct SerialState {
 ///     serde_json::from_value(json!({ "qmp_command": "query-status" })).unwrap();
 /// assert_eq!(bare.qmp_arguments, None);
 /// ```
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, serde::Deserialize, schemars::JsonSchema)]
 pub struct QmpRequest {
     /// The QMP command name, e.g. `query-status` or `query-block`.
     pub qmp_command: String,
-    /// The command arguments as a JSON object; omit for commands that
-    /// take no arguments.
+    /// The command arguments as a JSON object.
+    ///
+    /// Omit this field for commands that take no arguments.
     pub qmp_arguments: Option<Value>,
 }
 
@@ -102,7 +117,7 @@ pub struct QmpRequest {
 /// assert_eq!(defaults.max_chars, None);
 /// assert_eq!(defaults.clear, None);
 /// ```
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, serde::Deserialize, schemars::JsonSchema)]
 pub struct SerialReadRequest {
     /// Keep polling until this substring appears in the output, or give
     /// up after `timeout_ms`. Omit to return the pending output as-is.
@@ -133,7 +148,7 @@ pub struct SerialReadRequest {
 ///     serde_json::from_value(json!({ "data": "ls -l\n", "newline": false })).unwrap();
 /// assert_eq!(raw.newline, Some(false));
 /// ```
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, serde::Deserialize, schemars::JsonSchema)]
 pub struct SerialWriteRequest {
     /// Bytes to send to the guest's serial port, e.g. a command line.
     pub data: String,
@@ -143,9 +158,11 @@ pub struct SerialWriteRequest {
 
 #[tool_router]
 impl QMPSocket {
-    /// Build a server that reads `QMP_SOCKET_PATH` and
-    /// `SERIAL_SOCKET_PATH`, or the default socket paths when an
-    /// environment variable is unset.
+    /// Build a server from the socket paths in the environment.
+    ///
+    /// Reads `QMP_SOCKET_PATH` and `SERIAL_SOCKET_PATH`. Uses the default
+    /// socket paths when an environment variable is unset.
+    #[must_use = "returns a new server; call `serve` to run it"]
     pub fn new() -> Self {
         Self::with_paths(
             std::env::var("QMP_SOCKET_PATH").unwrap_or_else(|_| DEFAULT_QMP_SOCKET_PATH.to_owned()),
@@ -164,6 +181,7 @@ impl QMPSocket {
     /// let server = QMPSocket::with_paths("/tmp/qmp-sock", "/tmp/serial-sock");
     /// let _ = server;
     /// ```
+    #[must_use = "returns a new server; call `serve` to run it"]
     pub fn with_paths(
         qmp_socket_path: impl Into<String>,
         serial_socket_path: impl Into<String>,
@@ -276,8 +294,9 @@ impl QMPSocket {
         Ok(CallToolResult::success(vec![Content::text("ok")]))
     }
 
-    /// Connect to the serial socket and spawn a buffering reader task,
-    /// unless one is already running.
+    /// Connect to the serial socket and spawn the buffering reader task.
+    ///
+    /// Does nothing when a reader task already runs.
     async fn ensure_serial_connected(&self) -> Result<(), McpError> {
         let mut state = self.serial.lock().await;
         if state.connected {
@@ -321,8 +340,10 @@ impl QMPSocket {
         Ok(())
     }
 
-    /// Return the buffered serial output, optionally gated on a
-    /// substring, and optionally clear the buffer.
+    /// Return the buffered serial output.
+    ///
+    /// Waits for `wait_for` when given. Clears the buffer when `clear`
+    /// is set.
     async fn take_serial_output(
         &self,
         wait_for: Option<&str>,
@@ -399,8 +420,9 @@ fn qmp_request(command: &str, arguments: Option<&Value>, id: u64) -> Value {
     request
 }
 
-/// Send one QMP command and await its response, skipping asynchronous
-/// events.
+/// Send one QMP command and await its response.
+///
+/// Skips asynchronous events.
 async fn qmp_execute(
     reader: &mut BufReader<OwnedReadHalf>,
     writer: &mut OwnedWriteHalf,
@@ -447,8 +469,9 @@ async fn qmp_execute(
     }
 }
 
-/// Perform the QMP handshake: read the greeting and complete
-/// `qmp_capabilities` negotiation.
+/// Perform the QMP handshake.
+///
+/// Reads the greeting, then completes `qmp_capabilities` negotiation.
 async fn qmp_negotiate(
     reader: &mut BufReader<OwnedReadHalf>,
     writer: &mut OwnedWriteHalf,
