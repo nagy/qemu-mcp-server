@@ -156,6 +156,12 @@ pub struct SerialWriteRequest {
     pub newline: Option<bool>,
 }
 
+impl Default for QMPSocket {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[tool_router]
 impl QMPSocket {
     /// Build a server from the socket paths in the environment.

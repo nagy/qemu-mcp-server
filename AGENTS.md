@@ -18,7 +18,7 @@ any rmcp transport. `run()` is the stdio convenience entry point.
 Nix flake (no default.nix anymore):
 
 ```bash
-nix flake check   # builds the package and runs cargo tests + doctests
+nix flake check   # builds the package and runs cargo tests + doctests; also runs clippy and a treefmt check
 nix build         # build the binary into ./result
 nix fmt           # format flake, Rust, and TOML via treefmt (never run formatters standalone)
 nix build .#qemu-mcp-server-doc  # static rustdoc HTML in result/share/doc

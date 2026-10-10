@@ -98,6 +98,23 @@
             buildInputs = libInputs;
             meta.description = "QEMU MCP server doctest suite";
           };
+
+          # Clippy lint check with warnings as errors. Reuses the same
+          # cargoArtifacts, so only the crate itself re-compiles under the
+          # clippy driver. The crate denies `unwrap_used`, so this check
+          # enforces that lint on every target.
+          clippy = craneLib.cargoClippy {
+            inherit
+              src
+              cargoArtifacts
+              nativeBuildInputs
+              env
+              ;
+            buildInputs = libInputs;
+            cargoClippyExtraArgs = "--all-targets --all-features -- --deny warnings";
+            meta.description = "QEMU MCP server clippy check";
+          };
+
         in
         {
           packages.qemu-mcp-server = pkg;
@@ -115,6 +132,7 @@
             meta.description = "QEMU MCP server test suite";
           };
 
+          checks.clippy = clippy;
           checks.doctests = doctests;
 
           apps.default = {
