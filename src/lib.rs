@@ -17,8 +17,10 @@ use std::{
 
 use rmcp::{
     ErrorData as McpError, ServiceExt,
-    handler::server::tool::{Parameters, ToolRouter},
-    model::{CallToolResult, Content, ServerCapabilities, ServerInfo},
+    handler::server::{tool::ToolRouter, wrapper::Parameters},
+    model::{
+        CallToolResult, ContentBlock, ErrorCode, Implementation, ServerCapabilities, ServerConfig,
+    },
     tool, tool_handler, tool_router,
     transport::stdio,
 };
@@ -216,9 +218,11 @@ impl QMPSocket {
     ) -> Result<CallToolResult, McpError> {
         let ret = run_command(&self.socket_path, &qmp_command, qmp_arguments.as_ref()).await?;
 
-        Ok(CallToolResult::success(vec![Content::json(ret).map_err(
-            |e| McpError::internal_error(format!("failed to serialize QMP result: {e}"), None),
-        )?]))
+        Ok(CallToolResult::success(vec![
+            ContentBlock::json(ret).map_err(|e| {
+                McpError::internal_error(format!("failed to serialize QMP result: {e}"), None)
+            })?,
+        ]))
     }
 
     #[tool(
@@ -256,7 +260,7 @@ impl QMPSocket {
                 .take_serial_output(request.wait_for.as_deref(), max_chars, clear)
                 .await
             {
-                return Ok(CallToolResult::success(vec![Content::text(output)]));
+                return Ok(CallToolResult::success(vec![ContentBlock::text(output)]));
             }
             if Instant::now() >= deadline {
                 return Err(McpError::internal_error(
@@ -297,7 +301,7 @@ impl QMPSocket {
         writer.flush().await.map_err(|e| {
             McpError::internal_error(format!("failed to write to serial socket: {e}"), None)
         })?;
-        Ok(CallToolResult::success(vec![Content::text("ok")]))
+        Ok(CallToolResult::success(vec![ContentBlock::text("ok")]))
     }
 
     /// Connect to the serial socket and spawn the buffering reader task.
@@ -462,7 +466,7 @@ async fn qmp_execute(
             let desc = error.get("desc").and_then(Value::as_str).unwrap_or("");
             return Err(match class {
                 "CommandNotFound" => McpError::new(
-                    rmcp::model::ErrorCode::METHOD_NOT_FOUND,
+                    ErrorCode::METHOD_NOT_FOUND,
                     format!("QMP command not found: {command}"),
                     None,
                 ),
@@ -493,24 +497,20 @@ async fn qmp_negotiate(
     Ok(())
 }
 
-#[tool_handler]
+#[tool_handler(router = self.tool_router)]
 impl rmcp::ServerHandler for QMPSocket {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            server_info: rmcp::model::Implementation {
-                name: "qemu-mcp-server".into(),
-                version: env!("CARGO_PKG_VERSION").into(),
-            },
-            instructions: Some(
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(Implementation::new(
+                "qemu-mcp-server",
+                env!("CARGO_PKG_VERSION"),
+            ))
+            .with_instructions(
                 "Manage a QEMU virtual machine over its QMP socket and drive its serial console. \
                  Launch QEMU with `-qmp unix:/tmp/qmp-sock,server,nowait` and, for the serial \
                  tools, `-serial unix:/tmp/serial-sock,server,nowait`. Socket paths can be \
-                 overridden with QMP_SOCKET_PATH and SERIAL_SOCKET_PATH."
-                    .into(),
-            ),
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            ..Default::default()
-        }
+                 overridden with QMP_SOCKET_PATH and SERIAL_SOCKET_PATH.",
+            )
     }
 }
 
@@ -778,8 +778,6 @@ mod tests {
     fn result_text(result: CallToolResult) -> String {
         result
             .content
-            .as_deref()
-            .unwrap()
             .first()
             .and_then(|content| content.as_text())
             .map(|text| text.text.clone())
