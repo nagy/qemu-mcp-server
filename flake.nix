@@ -1,5 +1,5 @@
 {
-  description = "Model Context Protocol (MCP) server to interact with QEMU instances (crane)";
+  description = "Model Context Protocol (MCP) server to interact with QEMU instances";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -12,7 +12,6 @@
   outputs =
     inputs@{
       flake-parts,
-      nixpkgs,
       crane,
       treefmt-nix,
       ...
@@ -23,7 +22,6 @@
 
       perSystem =
         {
-          system,
           pkgs,
           lib,
           config,
@@ -32,112 +30,51 @@
         let
           craneLib = crane.mkLib pkgs;
 
-          # Pure Rust: no -sys crates in Cargo.toml, no build.rs probing
-          # pkg-config/bindgen/cmake — so no system libraries needed.
-          libInputs = [ ];
-
-          # No native build tools required either (see libInputs above).
-          nativeBuildInputs = [ ];
-
-          # No bindgen / dlopen'd C libs, hence no env vars.
-          env = { };
-
-          # Source as seen by cargo: everything tracked by git.
           src = craneLib.cleanCargoSource ./.;
 
-          # Cargo.lock has no network access during the build; fetch deps
-          # first, then feed them to cargo through the registry cache.
-          cargoArtifacts = craneLib.buildDepsOnly {
-            inherit src nativeBuildInputs;
-            buildInputs = libInputs;
-            inherit env;
-          };
+          cargoArtifacts = craneLib.buildDepsOnly { inherit src; };
+        in
+        {
+          packages = {
+            qemu-mcp-server = craneLib.buildPackage {
+              inherit src cargoArtifacts;
+              meta = {
+                description = "Model Context Protocol (MCP) server to interact with QEMU instances";
+                homepage = "https://github.com/nagy/qemu-mcp-server";
+                license = lib.licenses.agpl3Plus;
+                mainProgram = "qemu-mcp-server";
+                maintainers = with lib.maintainers; [ nagy ];
+              };
+            };
+            default = config.packages.qemu-mcp-server;
 
-          pkg = craneLib.buildPackage {
-            inherit
-              src
-              cargoArtifacts
-              env
-              ;
-            buildInputs = libInputs;
-            nativeBuildInputs = nativeBuildInputs;
-            meta = {
-              description = "Model Context Protocol (MCP) server to interact with QEMU instances";
-              homepage = "https://github.com/nagy/qemu-mcp-server";
-              license = lib.licenses.agpl3Plus;
-              mainProgram = "qemu-mcp-server";
-              maintainers = with lib.maintainers; [ nagy ];
+            qemu-mcp-server-doc = craneLib.cargoDoc {
+              inherit src cargoArtifacts;
+              meta.description = "QEMU MCP server API documentation";
             };
           };
 
-          # Static rustdoc HTML (what `cargo doc` writes to ./target/doc/)
-          # installed under $out/share/doc. Reuses the same cargoArtifacts,
-          # so only doc crates compile; --no-deps (crane's default) keeps
-          # third-party crates out of the search index. Browse offline:
-          # nix run nixpkgs#python3 -- -m http.server -d <doc-out>/share/doc
-          docs = craneLib.cargoDoc {
-            inherit
-              src
-              cargoArtifacts
-              nativeBuildInputs
-              env
-              ;
-            buildInputs = libInputs;
-            meta.description = "QEMU MCP server API documentation";
+          checks = {
+            default = craneLib.cargoTest {
+              inherit src cargoArtifacts;
+              meta.description = "QEMU MCP server test suite";
+            };
+
+            clippy = craneLib.cargoClippy {
+              inherit src cargoArtifacts;
+              cargoClippyExtraArgs = "--all-targets --all-features -- --deny warnings";
+              meta.description = "QEMU MCP server clippy check";
+            };
+
+            doctests = craneLib.cargoDocTest {
+              inherit src cargoArtifacts;
+              meta.description = "QEMU MCP server doctest suite";
+            };
           };
-
-          # Doctests: code blocks in doc comments compiled and run against
-          # the library (`cargo test --doc`), same artifact set as above.
-          doctests = craneLib.cargoDocTest {
-            inherit
-              src
-              cargoArtifacts
-              nativeBuildInputs
-              env
-              ;
-            buildInputs = libInputs;
-            meta.description = "QEMU MCP server doctest suite";
-          };
-
-          # Clippy lint check with warnings as errors. Reuses the same
-          # cargoArtifacts, so only the crate itself re-compiles under the
-          # clippy driver. The crate denies `unwrap_used`, so this check
-          # enforces that lint on every target.
-          clippy = craneLib.cargoClippy {
-            inherit
-              src
-              cargoArtifacts
-              nativeBuildInputs
-              env
-              ;
-            buildInputs = libInputs;
-            cargoClippyExtraArgs = "--all-targets --all-features -- --deny warnings";
-            meta.description = "QEMU MCP server clippy check";
-          };
-
-        in
-        {
-          packages.qemu-mcp-server = pkg;
-          packages.default = config.packages.qemu-mcp-server;
-          packages.qemu-mcp-server-doc = docs;
-
-          checks.default = craneLib.cargoTest {
-            inherit
-              src
-              cargoArtifacts
-              nativeBuildInputs
-              env
-              ;
-            buildInputs = libInputs;
-            meta.description = "QEMU MCP server test suite";
-          };
-
-          checks.clippy = clippy;
-          checks.doctests = doctests;
 
           apps.default = {
             type = "app";
-            program = "${pkg}/bin/qemu-mcp-server";
+            program = "${config.packages.qemu-mcp-server}/bin/qemu-mcp-server";
             meta.description = "Model Context Protocol (MCP) server to interact with QEMU instances";
           };
 
@@ -153,12 +90,7 @@
           };
 
           devShells.default = craneLib.devShell {
-            packages = [
-              config.treefmt.build.wrapper
-            ]
-            ++ nativeBuildInputs;
-            buildInputs = libInputs;
-            inherit env;
+            packages = [ config.treefmt.build.wrapper ];
           };
         };
     };
