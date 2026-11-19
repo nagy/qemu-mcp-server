@@ -12,6 +12,10 @@ Context Protocol (MCP) via QMP. Implementation lives in `src/lib.rs`;
 callers build a server with `QMPSocket::with_paths` (explicit socket
 paths) or `QMPSocket::new` (paths from environment), then serve it on
 any rmcp transport. `run()` is the stdio convenience entry point.
+Socket paths cross the API as `SocketPath` values, so the QMP path and
+the serial path cannot swap places at a call site. Failures cross the
+API as `QmpError` and `SerialError`; both convert into `rmcp`'s
+`McpError` at the tool boundary.
 
 ## Build & test
 
@@ -29,6 +33,12 @@ Dev shell provides cargo (`nix develop`).
 ## Conventions
 
 - Rust edition 2024; rustfmt config lives in `flake.nix` (treefmt).
+- Lint levels live in the `[lints]` table in `Cargo.toml`, never on a
+  command line. `all` sits at `deny`, `pedantic` and `nursery` at `warn`.
+  Silence a lint at its site with `#[expect(..., reason = "...")]`.
+  The crate holds no `clippy.toml`.
+- Hand-written `Display`, `Error`, and `From` impls are the fallback.
+  Derive them with `derive_more` (features `display`, `error`, `from`).
 - Keep `Cargo.lock` committed — the Nix build needs it and has no network.
 - Only git-tracked files enter the Nix build; `git add` new files before
   `nix build` or the build fails mysteriously.

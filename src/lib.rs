@@ -44,14 +44,65 @@ const SERIAL_BUFFER_LIMIT: usize = 256 * 1024;
 /// How often `read_serial` re-checks the buffer while waiting.
 const SERIAL_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
+/// Filesystem path to a QEMU unix socket.
+///
+/// The wrapper keeps the QMP path and the serial path from swapping
+/// places at a call site.
+///
+/// # Examples
+///
+/// ```
+/// use qemu_mcp_server::SocketPath;
+///
+/// let qmp = SocketPath::from("/tmp/qmp-sock");
+/// assert_eq!(qmp.as_str(), "/tmp/qmp-sock");
+/// assert_eq!(qmp.to_string(), "/tmp/qmp-sock");
+/// ```
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, derive_more::Display, derive_more::From,
+)]
+pub struct SocketPath(String);
+
+impl SocketPath {
+    /// Wrap a socket path.
+    #[must_use]
+    pub fn new(path: impl Into<String>) -> Self {
+        Self(path.into())
+    }
+
+    /// Borrow the path as a string slice.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<&str> for SocketPath {
+    fn from(path: &str) -> Self {
+        Self(path.to_owned())
+    }
+}
+
+impl AsRef<str> for SocketPath {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<std::path::Path> for SocketPath {
+    fn as_ref(&self) -> &std::path::Path {
+        self.0.as_ref()
+    }
+}
+
 /// MCP server exposing a QEMU instance's QMP socket and serial console.
 ///
 /// This type does not implement `Debug`, because [`ToolRouter`] does not.
 #[derive(Clone)]
 pub struct QMPSocket {
     tool_router: ToolRouter<Self>,
-    socket_path: String,
-    serial_socket_path: String,
+    socket_path: SocketPath,
+    serial_socket_path: SocketPath,
     serial: Arc<Mutex<SerialState>>,
 }
 
@@ -64,6 +115,53 @@ struct SerialState {
     connected: bool,
     /// Write half of the connection, owned while connected.
     writer: Option<OwnedWriteHalf>,
+}
+
+/// Failure while driving the guest's serial console.
+///
+/// [`McpError`] reports every variant as an internal error, so a caller
+/// that only needs the text prints the value with `Display`.
+///
+/// # Examples
+///
+/// ```
+/// use qemu_mcp_server::SerialError;
+///
+/// let error = SerialError::Lost;
+/// assert_eq!(error.to_string(), "serial connection lost, retry the call");
+/// ```
+#[derive(Debug, derive_more::Display, derive_more::Error, derive_more::From)]
+pub enum SerialError {
+    /// The serial socket refused the connection.
+    #[display("failed to connect to serial socket {path}: {source}")]
+    Connect {
+        /// Path the server tried to reach.
+        path: SocketPath,
+        /// Reason the connect call failed.
+        #[error(source)]
+        source: std::io::Error,
+    },
+    /// No background reader task holds a connection.
+    #[display("serial connection lost, retry the call")]
+    Lost,
+    /// Writing the payload to the socket failed.
+    #[display("failed to write to serial socket: {_0}")]
+    Write(#[from] std::io::Error),
+    /// The expected substring never appeared before the deadline.
+    #[display(
+        "timed out waiting for serial output containing {wait_for:?}; call again without \
+         `wait_for` to see the raw buffer"
+    )]
+    Timeout {
+        /// Substring that never appeared.
+        wait_for: Option<String>,
+    },
+}
+
+impl From<SerialError> for McpError {
+    fn from(error: SerialError) -> Self {
+        Self::internal_error(error.to_string(), None)
+    }
 }
 
 /// Parameters of the `execute_qmp` tool.
@@ -184,15 +282,21 @@ impl QMPSocket {
     /// # Examples
     ///
     /// ```
-    /// use qemu_mcp_server::QMPSocket;
+    /// use qemu_mcp_server::{QMPSocket, SocketPath};
     ///
     /// let server = QMPSocket::with_paths("/tmp/qmp-sock", "/tmp/serial-sock");
+    /// let _ = server;
+    ///
+    /// // `SocketPath` values make the argument order explicit.
+    /// let qmp = SocketPath::new("/tmp/qmp-sock");
+    /// let serial = SocketPath::new("/tmp/serial-sock");
+    /// let server = QMPSocket::with_paths(qmp, serial);
     /// let _ = server;
     /// ```
     #[must_use = "returns a new server; call `serve` to run it"]
     pub fn with_paths(
-        qmp_socket_path: impl Into<String>,
-        serial_socket_path: impl Into<String>,
+        qmp_socket_path: impl Into<SocketPath>,
+        serial_socket_path: impl Into<SocketPath>,
     ) -> Self {
         Self {
             tool_router: Self::tool_router(),
@@ -246,7 +350,7 @@ impl QMPSocket {
         // only reconnect when there is nothing to report.
         {
             let state = self.serial.lock().await;
-            if !(state.connected || !state.buffer.is_empty()) {
+            if !state.connected && state.buffer.is_empty() {
                 drop(state);
                 self.ensure_serial_connected().await?;
             }
@@ -263,14 +367,10 @@ impl QMPSocket {
                 return Ok(CallToolResult::success(vec![ContentBlock::text(output)]));
             }
             if Instant::now() >= deadline {
-                return Err(McpError::internal_error(
-                    format!(
-                        "timed out waiting for serial output containing {:?}; call again without \
-                         `wait_for` to see the raw buffer",
-                        request.wait_for
-                    ),
-                    None,
-                ));
+                return Err(SerialError::Timeout {
+                    wait_for: request.wait_for,
+                }
+                .into());
             }
             sleep(SERIAL_POLL_INTERVAL).await;
         }
@@ -291,37 +391,33 @@ impl QMPSocket {
         if request.newline.unwrap_or(true) {
             payload.push(b'\n');
         }
-        let mut state = self.serial.lock().await;
-        let writer = state.writer.as_mut().ok_or_else(|| {
-            McpError::internal_error("serial connection lost, retry the call", None)
-        })?;
-        writer.write_all(&payload).await.map_err(|e| {
-            McpError::internal_error(format!("failed to write to serial socket: {e}"), None)
-        })?;
-        writer.flush().await.map_err(|e| {
-            McpError::internal_error(format!("failed to write to serial socket: {e}"), None)
-        })?;
+        self.send_to_serial(&payload).await?;
         Ok(CallToolResult::success(vec![ContentBlock::text("ok")]))
+    }
+
+    /// Write bytes to the open serial connection.
+    async fn send_to_serial(&self, payload: &[u8]) -> Result<(), SerialError> {
+        let mut state = self.serial.lock().await;
+        let writer = state.writer.as_mut().ok_or(SerialError::Lost)?;
+        writer.write_all(payload).await?;
+        writer.flush().await?;
+        Ok(())
     }
 
     /// Connect to the serial socket and spawn the buffering reader task.
     ///
-    /// Does nothing when a reader task already runs.
-    async fn ensure_serial_connected(&self) -> Result<(), McpError> {
+    /// Does nothing when a reader task already runs. Errors when the
+    /// socket refuses the connection.
+    async fn ensure_serial_connected(&self) -> Result<(), SerialError> {
         let mut state = self.serial.lock().await;
         if state.connected {
             return Ok(());
         }
         let socket = UnixStream::connect(&self.serial_socket_path)
             .await
-            .map_err(|e| {
-                McpError::internal_error(
-                    format!(
-                        "failed to connect to serial socket {}: {e}",
-                        self.serial_socket_path
-                    ),
-                    None,
-                )
+            .map_err(|source| SerialError::Connect {
+                path: self.serial_socket_path.clone(),
+                source,
             })?;
         let (read_half, write_half) = socket.into_split();
         state.connected = true;
@@ -377,21 +473,87 @@ impl QMPSocket {
     }
 }
 
+/// Failure while talking QMP to the QEMU instance.
+///
+/// [`McpError`] maps [`QmpError::CommandNotFound`] to `METHOD_NOT_FOUND`,
+/// [`QmpError::Command`] to `INVALID_PARAMS`, and the rest to an internal
+/// error.
+///
+/// # Examples
+///
+/// ```
+/// use qemu_mcp_server::QmpError;
+/// use rmcp::model::ErrorCode;
+///
+/// let error = QmpError::CommandNotFound("frobnicate".to_owned());
+/// assert_eq!(error.to_string(), "QMP command not found: frobnicate");
+/// assert_eq!(
+///     rmcp::model::ErrorData::from(error).code,
+///     ErrorCode::METHOD_NOT_FOUND
+/// );
+/// ```
+#[derive(Debug, derive_more::Display, derive_more::Error, derive_more::From)]
+pub enum QmpError {
+    /// The QMP socket refused the connection.
+    #[display("failed to connect to QMP socket {path}: {source}")]
+    Connect {
+        /// Path the server tried to reach.
+        path: SocketPath,
+        /// Reason the connect call failed.
+        #[error(source)]
+        source: std::io::Error,
+    },
+    /// Reading from or writing to the socket failed.
+    #[display("QMP transport error: {_0}")]
+    Transport(#[from] std::io::Error),
+    /// QEMU closed the socket.
+    #[display("QMP connection closed by QEMU")]
+    Closed,
+    /// A line from QEMU is not valid JSON.
+    #[display("malformed QMP message: {_0}")]
+    Malformed(#[from] serde_json::Error),
+    /// The first message is not a QMP greeting.
+    #[display("expected QMP greeting, got: {_0}")]
+    BadGreeting(#[error(ignore)] Value),
+    /// QEMU does not know the command.
+    #[display("QMP command not found: {_0}")]
+    CommandNotFound(#[error(ignore)] String),
+    /// QEMU rejected the command.
+    #[display("QMP error ({class}): {desc}")]
+    Command {
+        /// QMP error class reported by QEMU.
+        class: String,
+        /// Human-readable description reported by QEMU.
+        desc: String,
+    },
+}
+
+impl From<QmpError> for McpError {
+    fn from(error: QmpError) -> Self {
+        let message = error.to_string();
+        match error {
+            QmpError::CommandNotFound(_) => Self::new(ErrorCode::METHOD_NOT_FOUND, message, None),
+            QmpError::Command { .. } => Self::invalid_params(message, None),
+            _ => Self::internal_error(message, None),
+        }
+    }
+}
+
 /// Connect to the QMP socket, negotiate, and execute one command.
 ///
 /// The connection is always shut down before returning, on success and
 /// on failure alike.
 async fn run_command(
-    socket_path: &str,
+    socket_path: &SocketPath,
     command: &str,
     arguments: Option<&Value>,
-) -> Result<Value, McpError> {
-    let socket = UnixStream::connect(socket_path).await.map_err(|e| {
-        McpError::internal_error(
-            format!("failed to connect to QMP socket {socket_path}: {e}"),
-            None,
-        )
-    })?;
+) -> Result<Value, QmpError> {
+    let socket = UnixStream::connect(socket_path)
+        .await
+        .map_err(|source| QmpError::Connect {
+            path: socket_path.clone(),
+            source,
+        })?;
     let (read_half, mut write_half) = socket.into_split();
     let mut reader = BufReader::new(read_half);
 
@@ -405,20 +567,12 @@ async fn run_command(
 }
 
 /// Read a single line from the QMP socket and parse it as JSON.
-async fn qmp_read_message(reader: &mut BufReader<OwnedReadHalf>) -> Result<Value, McpError> {
+async fn qmp_read_message(reader: &mut BufReader<OwnedReadHalf>) -> Result<Value, QmpError> {
     let mut line = String::new();
-    let n = reader
-        .read_line(&mut line)
-        .await
-        .map_err(|e| McpError::internal_error(format!("QMP connection error: {e}"), None))?;
-    if n == 0 {
-        return Err(McpError::internal_error(
-            "QMP connection closed by QEMU",
-            None,
-        ));
+    if reader.read_line(&mut line).await? == 0 {
+        return Err(QmpError::Closed);
     }
-    serde_json::from_str(&line)
-        .map_err(|e| McpError::internal_error(format!("malformed QMP message: {e}"), None))
+    Ok(serde_json::from_str(&line)?)
 }
 
 /// Build the JSON wire request for one QMP command.
@@ -439,16 +593,10 @@ async fn qmp_execute(
     command: &str,
     arguments: Option<&Value>,
     id: u64,
-) -> Result<Value, McpError> {
+) -> Result<Value, QmpError> {
     let request = qmp_request(command, arguments, id);
-    writer
-        .write_all(format!("{request}\n").as_bytes())
-        .await
-        .map_err(|e| McpError::internal_error(format!("failed to send QMP command: {e}"), None))?;
-    writer
-        .flush()
-        .await
-        .map_err(|e| McpError::internal_error(format!("failed to send QMP command: {e}"), None))?;
+    writer.write_all(format!("{request}\n").as_bytes()).await?;
+    writer.flush().await?;
 
     loop {
         let message = qmp_read_message(reader).await?;
@@ -464,13 +612,13 @@ async fn qmp_execute(
                 .and_then(Value::as_str)
                 .unwrap_or("unknown");
             let desc = error.get("desc").and_then(Value::as_str).unwrap_or("");
-            return Err(match class {
-                "CommandNotFound" => McpError::new(
-                    ErrorCode::METHOD_NOT_FOUND,
-                    format!("QMP command not found: {command}"),
-                    None,
-                ),
-                _ => McpError::invalid_params(format!("QMP error ({class}): {desc}"), None),
+            return Err(if class == "CommandNotFound" {
+                QmpError::CommandNotFound(command.to_owned())
+            } else {
+                QmpError::Command {
+                    class: class.to_owned(),
+                    desc: desc.to_owned(),
+                }
             });
         }
         if let Some(ret) = message.get("return") {
@@ -485,18 +633,19 @@ async fn qmp_execute(
 async fn qmp_negotiate(
     reader: &mut BufReader<OwnedReadHalf>,
     writer: &mut OwnedWriteHalf,
-) -> Result<(), McpError> {
+) -> Result<(), QmpError> {
     let greeting = qmp_read_message(reader).await?;
-    if !greeting.get("QMP").is_some() {
-        return Err(McpError::internal_error(
-            format!("expected QMP greeting, got: {greeting}"),
-            None,
-        ));
+    if greeting.get("QMP").is_none() {
+        return Err(QmpError::BadGreeting(greeting));
     }
     qmp_execute(reader, writer, "qmp_capabilities", None, 0).await?;
     Ok(())
 }
 
+#[expect(
+    clippy::unused_async_trait_impl,
+    reason = "rmcp's tool_handler macro generates the async trait impl"
+)]
 #[tool_handler(router = self.tool_router)]
 impl rmcp::ServerHandler for QMPSocket {
     fn get_info(&self) -> ServerConfig {
@@ -519,6 +668,12 @@ impl rmcp::ServerHandler for QMPSocket {
 /// This is the entry point for the `qemu-mcp-server` binary. Callers
 /// that need custom socket paths or a different transport construct
 /// [`QMPSocket`] directly and use [`rmcp::ServiceExt::serve`].
+///
+/// # Errors
+///
+/// Returns an error when the stdio transport fails to start, when the
+/// MCP handshake fails, or when the served connection ends in a
+/// transport error.
 pub async fn run() -> anyhow::Result<()> {
     let server = QMPSocket::new();
     let service = server.serve(stdio()).await?;
@@ -527,7 +682,6 @@ pub async fn run() -> anyhow::Result<()> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use rmcp::model::ErrorCode;
     use tokio::{io::AsyncWriteExt, net::UnixListener};
@@ -606,7 +760,7 @@ mod tests {
         std::env::temp_dir().join(format!("qemu-mcp-server-test-{name}.sock"))
     }
 
-    async fn bind(name: &str) -> (UnixListener, std::path::PathBuf) {
+    fn bind(name: &str) -> (UnixListener, std::path::PathBuf) {
         let path = socket_path(name);
         let _ = std::fs::remove_file(&path);
         (UnixListener::bind(&path).unwrap(), path)
@@ -620,7 +774,7 @@ mod tests {
 
     #[tokio::test]
     async fn passthrough_roundtrip_with_negotiation() {
-        let (listener, path) = bind("roundtrip").await;
+        let (listener, path) = bind("roundtrip");
         let server = tokio::spawn(serve(
             listener,
             vec![
@@ -642,7 +796,7 @@ mod tests {
 
     #[tokio::test]
     async fn asynchronous_events_are_skipped() {
-        let (listener, path) = bind("events").await;
+        let (listener, path) = bind("events");
         let server = tokio::spawn(serve(
             listener,
             vec![
@@ -665,7 +819,7 @@ mod tests {
 
     #[tokio::test]
     async fn command_not_found_maps_to_method_not_found() {
-        let (listener, path) = bind("command-not-found").await;
+        let (listener, path) = bind("command-not-found");
         let server = tokio::spawn(serve(
             listener,
             vec![
@@ -683,8 +837,10 @@ mod tests {
         let err = qmp_execute(&mut reader, &mut writer, "frobnicate", None, 1)
             .await
             .unwrap_err();
-        assert_eq!(err.code, ErrorCode::METHOD_NOT_FOUND);
-        assert!(err.message.contains("frobnicate"));
+        assert!(matches!(err, QmpError::CommandNotFound(ref command) if command == "frobnicate"));
+        let mcp = McpError::from(err);
+        assert_eq!(mcp.code, ErrorCode::METHOD_NOT_FOUND);
+        assert!(mcp.message.contains("frobnicate"));
         drop(reader);
         drop(writer);
         server.await.unwrap();
@@ -693,7 +849,7 @@ mod tests {
 
     #[tokio::test]
     async fn qmp_error_maps_to_invalid_params() {
-        let (listener, path) = bind("device-not-found").await;
+        let (listener, path) = bind("device-not-found");
         let server = tokio::spawn(serve(
             listener,
             vec![
@@ -717,9 +873,15 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
-        assert!(err.message.contains("DeviceNotFound"));
-        assert!(err.message.contains("ide-cd0"));
+        assert!(matches!(
+            err,
+            QmpError::Command { ref class, ref desc }
+                if class == "DeviceNotFound" && desc.contains("ide-cd0")
+        ));
+        let mcp = McpError::from(err);
+        assert_eq!(mcp.code, ErrorCode::INVALID_PARAMS);
+        assert!(mcp.message.contains("DeviceNotFound"));
+        assert!(mcp.message.contains("ide-cd0"));
         drop(reader);
         drop(writer);
         server.await.unwrap();
@@ -728,7 +890,7 @@ mod tests {
 
     #[tokio::test]
     async fn negotiate_rejects_a_bad_greeting() {
-        let (listener, path) = bind("bad-greeting").await;
+        let (listener, path) = bind("bad-greeting");
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let (_, mut write_half) = stream.into_split();
@@ -736,7 +898,8 @@ mod tests {
         });
         let (mut reader, mut writer) = connect(&path).await;
         let err = qmp_negotiate(&mut reader, &mut writer).await.unwrap_err();
-        assert!(err.message.contains("expected QMP greeting"));
+        assert!(matches!(err, QmpError::BadGreeting(_)));
+        assert!(err.to_string().contains("expected QMP greeting"));
         drop(reader);
         drop(writer);
         server.await.unwrap();
@@ -745,7 +908,10 @@ mod tests {
 
     /// Build a server instance wired to the given test socket paths.
     fn server_with_paths(qmp: &std::path::Path, serial: &std::path::Path) -> QMPSocket {
-        QMPSocket::with_paths(qmp.display().to_string(), serial.display().to_string())
+        QMPSocket::with_paths(
+            SocketPath::from(qmp.display().to_string()),
+            SocketPath::from(serial.display().to_string()),
+        )
     }
 
     fn serial_read_request(wait_for: Option<&str>) -> SerialReadRequest {
@@ -775,7 +941,7 @@ mod tests {
     }
 
     /// Extract the text of a tool result's first content item.
-    fn result_text(result: CallToolResult) -> String {
+    fn result_text(result: &CallToolResult) -> String {
         result
             .content
             .first()
@@ -786,8 +952,8 @@ mod tests {
 
     #[tokio::test]
     async fn serial_output_is_buffered_and_writable() {
-        let (_, qmp_path) = bind("serial-qmp-unused").await;
-        let (listener, serial_path) = bind("serial-main").await;
+        let (_, qmp_path) = bind("serial-qmp-unused");
+        let (listener, serial_path) = bind("serial-main");
         let fake = tokio::spawn(serve_serial(listener));
         let server = server_with_paths(&qmp_path, &serial_path);
 
@@ -795,7 +961,7 @@ mod tests {
             .read_serial(Parameters(serial_read_request(Some("Boot OK"))))
             .await
             .unwrap();
-        let text = result_text(result);
+        let text = result_text(&result);
         assert!(text.contains("Booting ESP32..."));
         assert!(text.contains("Boot OK"));
 
@@ -809,7 +975,7 @@ mod tests {
             .read_serial(Parameters(serial_read_request(Some("echo: hi"))))
             .await
             .unwrap();
-        let text = result_text(result);
+        let text = result_text(&result);
         assert!(text.contains("echo: hi"));
 
         drop(server);
@@ -820,8 +986,8 @@ mod tests {
 
     #[tokio::test]
     async fn serial_read_times_out_without_a_match() {
-        let (_, qmp_path) = bind("serial-qmp-unused2").await;
-        let (listener, serial_path) = bind("serial-timeout").await;
+        let (_, qmp_path) = bind("serial-qmp-unused2");
+        let (listener, serial_path) = bind("serial-timeout");
         let fake = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let (_, mut write_half) = stream.into_split();
@@ -844,8 +1010,8 @@ mod tests {
 
     #[tokio::test]
     async fn serial_clear_drops_the_buffer() {
-        let (_, qmp_path) = bind("serial-qmp-unused3").await;
-        let (listener, serial_path) = bind("serial-clear").await;
+        let (_, qmp_path) = bind("serial-qmp-unused3");
+        let (listener, serial_path) = bind("serial-clear");
         let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
         let fake = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
@@ -866,7 +1032,7 @@ mod tests {
             .read_serial(Parameters(serial_read_request(None)))
             .await
             .unwrap();
-        assert_eq!(result_text(result), "");
+        assert_eq!(result_text(&result), "");
 
         drop(server);
         let _ = done_tx.send(());

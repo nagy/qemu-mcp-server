@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.104"
+derive_more = { version = "2.1.1", features = ["display", "error", "from"] }
 rmcp = { version = "3.5.1", features = ["transport-io"] }
 schemars = "1.2.2"
 serde = "1.0.229"
@@ -19,5 +20,20 @@ tokio = { version = "1.53.2", features = [
 
 # The library target holds the implementation (src/lib.rs); the binary is a
 # thin wrapper around `qemu_mcp_server::run()` (src/main.rs).
+#
+# Lint levels live here, not on the command line, so `cargo clippy` and the
+# flake gate read one table. A lint group needs `priority = -1` next to the
+# single lint entries, because a single entry defaults to priority 0.
+[lints.rust]
+unsafe_code = "warn"
+missing_copy_implementations = "warn"
+
 [lints.clippy]
-unwrap_used = "deny"
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+missing_const_for_fn = "warn"
+unused_result_ok = "warn"
+undocumented_unsafe_blocks = "warn"
+# Nursery lint that does not fit this house style.
+significant_drop_tightening = "allow"
