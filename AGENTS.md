@@ -30,6 +30,24 @@ nix build .#qemu-mcp-server-doc  # static rustdoc HTML in result/share/doc
 
 Dev shell provides cargo (`nix develop`).
 
+## Layout
+
+- `src/lib.rs` — crate docs, `QMPSocket`, the `#[tool_router]` tool
+  methods, `ServerHandler`, `run()`, and the request structs.
+- `src/qmp.rs` — `QmpError` and the QMP client helpers.
+- `src/serial.rs` — `SerialError`, `SerialState`, and the buffered
+  serial helpers.
+- `src/path.rs` — `SocketPath`.
+- `src/test_support.rs` — socket fixtures shared by the test modules.
+  It sits behind `#[cfg(test)]`, so it never enters the binary.
+
+Each module holds its own `#[cfg(test)] mod tests` next to the code it
+covers. `lib.rs` carries no unit tests; the request structs have
+doctests only.
+
+Every module file carries one `//!` doc. The crate root declares the
+modules bare and re-exports the public types.
+
 ## Conventions
 
 - Rust edition 2024; rustfmt config lives in `flake.nix` (treefmt).
@@ -37,8 +55,9 @@ Dev shell provides cargo (`nix develop`).
   command line. `all` sits at `deny`, `pedantic` and `nursery` at `warn`.
   Silence a lint at its site with `#[expect(..., reason = "...")]`.
   The crate holds no `clippy.toml`.
-- Hand-written `Display`, `Error`, and `From` impls are the fallback.
-  Derive them with `derive_more` (features `display`, `error`, `from`).
+- Hand-written `Display`, `Error`, `From`, and `AsRef` impls are the
+  fallback. Derive them with `derive_more` (features `display`, `error`,
+  `from`, `as_ref`).
 - Keep `Cargo.lock` committed — the Nix build needs it and has no network.
 - Only git-tracked files enter the Nix build; `git add` new files before
   `nix build` or the build fails mysteriously.
