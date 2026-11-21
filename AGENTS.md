@@ -45,9 +45,6 @@ Protocol (MCP) through QMP. `src/main.rs` is a thin wrapper around
 
 ## Rules
 
-- Keep `Cargo.lock` committed. The Nix build needs it and has no network.
-- Only git-tracked files enter the Nix build. `git add` new files before
-  `nix build`, or the build fails mysteriously.
 - Lint levels live in the `[lints]` table in `Cargo.toml`, never on a command
   line. `all` sits at `deny`, `pedantic` and `nursery` at `warn`. Silence a lint
   at its site with `#[expect(..., reason = "...")]`. The crate holds no
