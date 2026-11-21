@@ -20,8 +20,7 @@ Protocol (MCP) through QMP. `src/main.rs` is a thin wrapper around
 
 ## Build and test
 
-- `nix flake check` — builds the package, runs cargo tests and doctests, clippy,
-  and a treefmt check. Run before done.
+- `nix flake check` — the gate. Run before done.
 - `nix build` — build the binary into `./result`.
 - `nix fmt` — format flake, Rust and TOML through treefmt. Never run formatters
   standalone.
