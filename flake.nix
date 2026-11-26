@@ -38,8 +38,10 @@
           packages = {
             qemu-mcp-server = craneLib.buildPackage {
               inherit src cargoArtifacts;
+              # No description here: crane fills meta.description from the
+              # `description' field in Cargo.toml, so spelling it out again
+              # would only drift on the next edit.
               meta = {
-                description = "Model Context Protocol (MCP) server to interact with QEMU instances";
                 homepage = "https://github.com/nagy/qemu-mcp-server";
                 license = lib.licenses.agpl3Plus;
                 mainProgram = "qemu-mcp-server";

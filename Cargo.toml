@@ -2,6 +2,7 @@
 name = "qemu-mcp-server"
 version = "0.1.0"
 edition = "2024"
+description = "Model Context Protocol (MCP) server to interact with QEMU instances"
 
 [dependencies]
 anyhow = "1.0.104"
